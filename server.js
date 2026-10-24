@@ -50,12 +50,12 @@ const API = "/api/v1";
 const isVercel = process.env.VERCEL === "1";
 
 // --------------------------------------------------
-// CORS
+// CORS CONFIGURATION
 // --------------------------------------------------
 
 const allowedOrigins = (process.env.CLIENT_ORIGINS || "")
   .split(",")
-  .map((origin) => origin.trim())
+  .map((origin) => origin.trim().replace(/\/+$/, ""))
   .filter(Boolean);
 
 function corsOrigin(origin, callback) {
@@ -63,7 +63,9 @@ function corsOrigin(origin, callback) {
     return callback(null, true);
   }
 
-  if (allowedOrigins.includes(origin)) {
+  const normalizedOrigin = origin.replace(/\/+$/, "");
+
+  if (allowedOrigins.includes(normalizedOrigin)) {
     return callback(null, true);
   }
 
@@ -74,45 +76,22 @@ function corsOrigin(origin, callback) {
     return callback(null, true);
   }
 
-  return callback(
-    new Error(`CORS blocked for origin: ${origin}`)
-  );
+  console.error("CORS blocked origin:", origin);
+
+  return callback(new Error(`CORS blocked for origin: ${origin}`));
 }
 
-app.use(
-  cors({
-    origin: corsOrigin,
-    credentials: true,
-  })
-);
+const corsOptions = {
+  origin: corsOrigin,
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+
+app.use(cors(corsOptions));
 
 // --------------------------------------------------
-// Socket.IO - standalone server only
-// --------------------------------------------------
-
-let io = null;
-
-if (!isVercel) {
-  io = new SocketIO(httpServer, {
-    cors: {
-      origin: corsOrigin,
-      credentials: true,
-    },
-  });
-
-  io.on("connection", (socket) => {
-    console.log(`Socket connected: ${socket.id}`);
-
-    socket.on("disconnect", () => {
-      console.log(`Socket disconnected: ${socket.id}`);
-    });
-  });
-}
-
-app.set("io", io);
-
-// --------------------------------------------------
-// Middleware
+// SECURITY AND MIDDLEWARE
 // --------------------------------------------------
 
 app.use(helmet());
@@ -121,9 +100,7 @@ app.use(cookieParser());
 
 app.use(
   morgan(
-    process.env.NODE_ENV === "production"
-      ? "combined"
-      : "dev"
+    process.env.NODE_ENV === "production" ? "combined" : "dev"
   )
 );
 
@@ -150,7 +127,33 @@ app.use(
 );
 
 // --------------------------------------------------
-// Root and health routes
+// SOCKET.IO - LOCAL SERVER ONLY
+// --------------------------------------------------
+
+let io = null;
+
+if (!isVercel) {
+  io = new SocketIO(httpServer, {
+    cors: {
+      origin: corsOrigin,
+      credentials: true,
+      methods: ["GET", "POST"],
+    },
+  });
+
+  io.on("connection", (socket) => {
+    console.log(`Socket connected: ${socket.id}`);
+
+    socket.on("disconnect", () => {
+      console.log(`Socket disconnected: ${socket.id}`);
+    });
+  });
+}
+
+app.set("io", io);
+
+// --------------------------------------------------
+// ROOT AND HEALTH ROUTES
 // --------------------------------------------------
 
 app.get("/", (req, res) => {
@@ -171,8 +174,7 @@ app.get("/health", (req, res) => {
 });
 
 // --------------------------------------------------
-// Database connection
-// Cache the connection promise per warm instance
+// DATABASE CONNECTION
 // --------------------------------------------------
 
 let dbPromise;
@@ -188,8 +190,11 @@ function ensureDB() {
   return dbPromise;
 }
 
-// Health/root routes can respond without DB.
-// API routes require a successful DB connection.
+// --------------------------------------------------
+// API ROUTES
+// CORS middleware handles OPTIONS before this section.
+// --------------------------------------------------
+
 app.use(API, async (req, res, next) => {
   try {
     await ensureDB();
@@ -198,10 +203,6 @@ app.use(API, async (req, res, next) => {
     next(error);
   }
 });
-
-// --------------------------------------------------
-// API routes
-// --------------------------------------------------
 
 app.use(`${API}/auth`, authRoutes);
 app.use(`${API}/users`, userRoutes);
@@ -231,20 +232,20 @@ app.use(`${API}/it`, itRoutes);
 app.use(`${API}/it-support`, itSupportRoutes);
 
 // --------------------------------------------------
-// Error handling - keep these last
+// ERROR HANDLING
 // --------------------------------------------------
 
 app.use(notFound);
 app.use(errorHandler);
 
 // --------------------------------------------------
-// Export Express app for Vercel
+// EXPORT FOR VERCEL
 // --------------------------------------------------
 
 export default app;
 
 // --------------------------------------------------
-// Start local server only
+// LOCAL SERVER
 // --------------------------------------------------
 
 if (!isVercel) {
