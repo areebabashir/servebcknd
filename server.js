@@ -1,3 +1,4 @@
+
 import "dotenv/config";
 import express from "express";
 import http from "http";
@@ -39,24 +40,32 @@ import dashboardRoutes from "./routes/dashboard.routes.js";
 import caseReferralRoutes from "./routes/caseReferral.routes.js";
 import itRoutes from "./routes/it.routes.js";
 import itSupportRoutes from "./routes/itSupport.routes.js";
-import { startDonationReminderScheduler } from "./jobs/donationReminders.js";
 
+import { startDonationReminderScheduler } from "./jobs/donationReminders.js";
 
 const app = express();
 const httpServer = http.createServer(app);
 
-const allowedOrigins = (process.env.CLIENT_ORIGINS ?? "")
+const API = "/api/v1";
+
+// Allowed frontend origins
+const allowedOrigins = (process.env.CLIENT_ORIGINS || "")
   .split(",")
-  .map((o) => o.trim())
+  .map((origin) => origin.trim())
   .filter(Boolean);
 
+// CORS configuration
 function corsOrigin(origin, callback) {
-  // Non-browser requests (no Origin header)
-  if (!origin) return callback(null, true);
+  // Allow requests without an Origin header (e.g. server-to-server)
+  if (!origin) {
+    return callback(null, true);
+  }
 
-  if (allowedOrigins.includes(origin)) return callback(null, true);
+  if (allowedOrigins.includes(origin)) {
+    return callback(null, true);
+  }
 
-  // In development, allow any localhost / 127.0.0.1 port (Vite often switches ports)
+  // Allow localhost during development only
   if (
     process.env.NODE_ENV !== "production" &&
     /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
@@ -64,7 +73,9 @@ function corsOrigin(origin, callback) {
     return callback(null, true);
   }
 
-  return callback(new Error(`CORS blocked for origin: ${origin}`));
+  return callback(
+    new Error(`CORS blocked for origin: ${origin}`)
+  );
 }
 
 // Socket.IO
@@ -74,16 +85,18 @@ const io = new SocketIO(httpServer, {
     credentials: true,
   },
 });
+
 app.set("io", io);
 
 io.on("connection", (socket) => {
   console.log(`Socket connected: ${socket.id}`);
+
   socket.on("disconnect", () => {
     console.log(`Socket disconnected: ${socket.id}`);
   });
 });
 
-// CORS
+// Middleware
 app.use(
   cors({
     origin: corsOrigin,
@@ -91,32 +104,60 @@ app.use(
   })
 );
 
-// Security & perf
 app.use(helmet());
 app.use(compression());
 app.use(cookieParser());
-app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 
-// Body parsing
+app.use(
+  morgan(
+    process.env.NODE_ENV === "production"
+      ? "combined"
+      : "dev"
+  )
+);
+
 app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+app.use(
+  express.urlencoded({
+    extended: true,
+    limit: "10mb",
+  })
+);
 
-// Global rate limit
+// Rate limiting
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 200,
     standardHeaders: true,
     legacyHeaders: false,
-    message: { success: false, message: "Too many requests, please try again later." },
+    message: {
+      success: false,
+      message: "Too many requests, please try again later.",
+    },
   })
 );
 
+// Root route
+app.get("/", (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: "Welfare Management API is running",
+    health: "/health",
+    apiBase: API,
+  });
+});
+
 // Health check
-app.get("/health", (_req, res) => res.json({ status: "ok", timestamp: new Date().toISOString() }));
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    success: true,
+    status: "ok",
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // API routes
-const API = "/api/v1";
 app.use(`${API}/auth`, authRoutes);
 app.use(`${API}/users`, userRoutes);
 app.use(`${API}/members`, memberRoutes);
@@ -144,17 +185,34 @@ app.use(`${API}/case-referrals`, caseReferralRoutes);
 app.use(`${API}/it`, itRoutes);
 app.use(`${API}/it-support`, itSupportRoutes);
 
-
-// 404 + error handler
+// 404 handler must come after all routes
 app.use(notFound);
+
+// Central error handler must be last
 app.use(errorHandler);
 
-// Start
+// Export app for platforms that import an Express application
+export default app;
+
+// Start the standalone Node.js server
 const PORT = process.env.PORT || 5000;
-connectDB().then(() => {
-  httpServer.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-    console.log(`Environment: ${process.env.NODE_ENV}`);
-    startDonationReminderScheduler();
-  });
-});
+
+const isVercel = process.env.VERCEL === "1";
+
+if (!isVercel) {
+  connectDB()
+    .then(() => {
+      httpServer.listen(PORT, () => {
+        console.log(`Server running on port ${PORT}`);
+        console.log(
+          `Environment: ${process.env.NODE_ENV || "development"}`
+        );
+
+        startDonationReminderScheduler();
+      });
+    })
+    .catch((error) => {
+      console.error("Failed to start server:", error);
+      process.exit(1);
+    });
+}
