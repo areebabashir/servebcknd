@@ -13,7 +13,6 @@ import { Server as SocketIO } from "socket.io";
 import { connectDB } from "./config/db.js";
 import { errorHandler, notFound } from "./middleware/errorHandler.js";
 
-// Routes
 import authRoutes from "./routes/auth.routes.js";
 import userRoutes from "./routes/user.routes.js";
 import memberRoutes from "./routes/member.routes.js";
@@ -46,17 +45,20 @@ import { startDonationReminderScheduler } from "./jobs/donationReminders.js";
 const app = express();
 const httpServer = http.createServer(app);
 
+const PORT = process.env.PORT || 5000;
 const API = "/api/v1";
+const isVercel = process.env.VERCEL === "1";
 
-// Allowed frontend origins
+// --------------------------------------------------
+// CORS
+// --------------------------------------------------
+
 const allowedOrigins = (process.env.CLIENT_ORIGINS || "")
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
 
-// CORS configuration
 function corsOrigin(origin, callback) {
-  // Allow requests without an Origin header (e.g. server-to-server)
   if (!origin) {
     return callback(null, true);
   }
@@ -65,7 +67,6 @@ function corsOrigin(origin, callback) {
     return callback(null, true);
   }
 
-  // Allow localhost during development only
   if (
     process.env.NODE_ENV !== "production" &&
     /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
@@ -78,31 +79,41 @@ function corsOrigin(origin, callback) {
   );
 }
 
-// Socket.IO
-const io = new SocketIO(httpServer, {
-  cors: {
-    origin: corsOrigin,
-    credentials: true,
-  },
-});
-
-app.set("io", io);
-
-io.on("connection", (socket) => {
-  console.log(`Socket connected: ${socket.id}`);
-
-  socket.on("disconnect", () => {
-    console.log(`Socket disconnected: ${socket.id}`);
-  });
-});
-
-// Middleware
 app.use(
   cors({
     origin: corsOrigin,
     credentials: true,
   })
 );
+
+// --------------------------------------------------
+// Socket.IO - standalone server only
+// --------------------------------------------------
+
+let io = null;
+
+if (!isVercel) {
+  io = new SocketIO(httpServer, {
+    cors: {
+      origin: corsOrigin,
+      credentials: true,
+    },
+  });
+
+  io.on("connection", (socket) => {
+    console.log(`Socket connected: ${socket.id}`);
+
+    socket.on("disconnect", () => {
+      console.log(`Socket disconnected: ${socket.id}`);
+    });
+  });
+}
+
+app.set("io", io);
+
+// --------------------------------------------------
+// Middleware
+// --------------------------------------------------
 
 app.use(helmet());
 app.use(compression());
@@ -117,6 +128,7 @@ app.use(
 );
 
 app.use(express.json({ limit: "10mb" }));
+
 app.use(
   express.urlencoded({
     extended: true,
@@ -124,7 +136,6 @@ app.use(
   })
 );
 
-// Rate limiting
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -138,7 +149,10 @@ app.use(
   })
 );
 
-// Root route
+// --------------------------------------------------
+// Root and health routes
+// --------------------------------------------------
+
 app.get("/", (req, res) => {
   res.status(200).json({
     success: true,
@@ -148,7 +162,6 @@ app.get("/", (req, res) => {
   });
 });
 
-// Health check
 app.get("/health", (req, res) => {
   res.status(200).json({
     success: true,
@@ -157,7 +170,39 @@ app.get("/health", (req, res) => {
   });
 });
 
+// --------------------------------------------------
+// Database connection
+// Cache the connection promise per warm instance
+// --------------------------------------------------
+
+let dbPromise;
+
+function ensureDB() {
+  if (!dbPromise) {
+    dbPromise = connectDB().catch((error) => {
+      dbPromise = null;
+      throw error;
+    });
+  }
+
+  return dbPromise;
+}
+
+// Health/root routes can respond without DB.
+// API routes require a successful DB connection.
+app.use(API, async (req, res, next) => {
+  try {
+    await ensureDB();
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// --------------------------------------------------
 // API routes
+// --------------------------------------------------
+
 app.use(`${API}/auth`, authRoutes);
 app.use(`${API}/users`, userRoutes);
 app.use(`${API}/members`, memberRoutes);
@@ -185,23 +230,28 @@ app.use(`${API}/case-referrals`, caseReferralRoutes);
 app.use(`${API}/it`, itRoutes);
 app.use(`${API}/it-support`, itSupportRoutes);
 
-// 404 handler must come after all routes
-app.use(notFound);
+// --------------------------------------------------
+// Error handling - keep these last
+// --------------------------------------------------
 
-// Central error handler must be last
+app.use(notFound);
 app.use(errorHandler);
 
-// Export app for platforms that import an Express application
+// --------------------------------------------------
+// Export Express app for Vercel
+// --------------------------------------------------
+
 export default app;
 
-// Start the standalone Node.js server
-const PORT = process.env.PORT || 5000;
-
-const isVercel = process.env.VERCEL === "1";
+// --------------------------------------------------
+// Start local server only
+// --------------------------------------------------
 
 if (!isVercel) {
-  connectDB()
-    .then(() => {
+  async function startServer() {
+    try {
+      await ensureDB();
+
       httpServer.listen(PORT, () => {
         console.log(`Server running on port ${PORT}`);
         console.log(
@@ -210,9 +260,11 @@ if (!isVercel) {
 
         startDonationReminderScheduler();
       });
-    })
-    .catch((error) => {
+    } catch (error) {
       console.error("Failed to start server:", error);
       process.exit(1);
-    });
+    }
+  }
+
+  startServer();
 }
